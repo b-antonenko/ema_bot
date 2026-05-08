@@ -1,0 +1,13 @@
+{
+  "name": "ema-live-scanner",
+  "version": "1.0.0",
+  "description": "EMA 20/50 Live Scanner with Telegram Notifications",
+  "main": "scanner.js",
+  "scripts": { "start": "node scanner.js" },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "technicalindicators": "^3.1.0",
+    "node-cron": "^3.0.3",
+    "dotenv": "^16.3.1"
+  }
+}
