@@ -15,7 +15,7 @@ const PARTIAL_TP_PCT    = parseFloat(process.env.PARTIAL_TP_PCT)    || 0.015;
 const POSITION_SIZE_USD = parseFloat(process.env.POSITION_SIZE_USD) || 1000;
 
 // ── Symbols and timeframes to track ───────────────────────────────────────────
-const SYMBOLS    = ["BTCUSDT", "SOLUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT"];
+const SYMBOLS = ["BTCUSDT", "SOLUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "TRXUSDT", "DOGEUSDT", "ADAUSDT", "TONUSDT", "HYPEUSDT", "LTCUSDT", "LINKUSDT", "SUIUSDT", "SHIBUSDT", "DOTUSDT"];
 const TIMEFRAMES = ["1h", "2h", "4h"];
 
 // ── Per-coin per-timeframe isolated state ──────────────────────────────────────
