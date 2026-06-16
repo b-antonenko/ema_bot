@@ -284,6 +284,15 @@ Spread: ${(spread * 100).toFixed(3)}%
       const touchOk = touchesEma(lows[i], highs[i], e20);
       const allOk = spreadOk && adxOk && macdOk;
 
+      console.log(
+        `[ENTRY CHECK] ${symbol} dir=${state.waitingForTouch} ` +
+        `time=${new Date(times[i]).toISOString()} ` +
+        `spread=${(spread * 100).toFixed(3)} ok=${spreadOk} ` +
+        `adx=${adxVal?.toFixed(2)} ok=${adxOk} ` +
+        `macdHist=${macdHist?.toFixed(4)} ok=${macdOk} ` +
+        `touch=${touchOk} low=${lows[i]} high=${highs[i]} ema20=${e20}`
+      );
+
       // Notify once when all filters pass (before touch)
       if (allOk && !state.filtersNotified) {
         state.filtersNotified = true;
