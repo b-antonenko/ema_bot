@@ -5,7 +5,10 @@ const { EMA, MACD, ADX } = require("technicalindicators");
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-const INTERVAL = process.env.INTERVAL || "1h";
+const INTERVALS = (process.env.INTERVALS || "1h,2h,4h")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 const MIN_SPREAD_PCT = parseFloat(process.env.MIN_SPREAD_PCT) || 0.005;
 const CONFIRM_DELAY = parseInt(process.env.CONFIRM_DELAY) || 2;
 const TRAILING_STOP_PCT = parseFloat(process.env.TRAILING_STOP_PCT) || 0.015;
@@ -14,13 +17,10 @@ const ADX_PERIOD = parseInt(process.env.ADX_PERIOD) || 14;
 const PARTIAL_TP_PCT = parseFloat(process.env.PARTIAL_TP_PCT) || 0.015;
 const POSITION_SIZE_USD = parseFloat(process.env.POSITION_SIZE_USD) || 1000;
 
-const SYMBOLS = [
-  "BTCUSDT",
-  "SOLUSDT",
-  "ETHUSDT",
-  "BNBUSDT",
-  "XRPUSDT",
-];
+const SYMBOLS = (process.env.SYMBOLS || "BTCUSDT,SOLUSDT,ETHUSDT,BNBUSDT,XRPUSDT")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 function makeState() {
   return {
@@ -31,12 +31,20 @@ function makeState() {
     filtersNotified: false,
     position: null,
     lastTouchCandleTime: null,
-    lastEntryCheckCandleTime: null,
+    lastEntryCheckKey: null,
   };
 }
 
 const states = {};
-for (const sym of SYMBOLS) states[sym] = makeState();
+for (const sym of SYMBOLS) {
+  for (const interval of INTERVALS) {
+    states[`${sym}_${interval}`] = makeState();
+  }
+}
+
+function stateKey(symbol, interval) {
+  return `${symbol}_${interval}`;
+}
 
 async function sendTelegram(message) {
   if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
@@ -54,9 +62,9 @@ async function sendTelegram(message) {
   }
 }
 
-async function fetchKlines(symbol, limit = 200) {
+async function fetchKlines(symbol, interval, limit = 200) {
   const res = await axios.get(
-    `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${INTERVAL}&limit=${limit}`,
+    `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
   );
   return res.data;
 }
@@ -118,11 +126,12 @@ function calcIndicators(klines) {
   return { closes, highs, lows, times, ema20, ema50, macdArr, adxArr, len };
 }
 
-async function scan(symbol) {
-  const state = states[symbol];
+async function scan(symbol, interval) {
+  const key = stateKey(symbol, interval);
+  const state = states[key];
 
   try {
-    const klines = await fetchKlines(symbol, 200);
+    const klines = await fetchKlines(symbol, interval, 200);
     const { closes, highs, lows, times, ema20, ema50, macdArr, adxArr, len } =
       calcIndicators(klines);
 
@@ -137,7 +146,7 @@ async function scan(symbol) {
     const e50prev = ema50[signalIdx - 1];
     const liveE20 = ema20[liveIdx] ?? e20;
 
-    if (!e20 || !e50 || !e20prev || !e50prev) return;
+    if (e20 == null || e50 == null || e20prev == null || e50prev == null) return;
 
     const currentPrice = closes[liveIdx];
     const goldenCross = e20prev <= e50prev && e20 > e50;
@@ -147,6 +156,7 @@ async function scan(symbol) {
     const spread = Math.abs(e20 - e50) / e50;
     const liveTouchOk = touchesEma(lows[liveIdx], highs[liveIdx], liveE20);
     const liveCandleTime = times[liveIdx];
+    const signalTime = times[signalIdx];
 
     if (state.position) {
       const pos = state.position;
@@ -158,7 +168,7 @@ async function scan(symbol) {
           pos.trailStop = pos.trailPeak * (1 - TRAILING_STOP_PCT);
           if (pos.trailStop > old + 0.5) {
             await sendTelegram(
-              `🔄 STOP LOSS MOVED UP — ${symbol}\n\n📌 LONG | Entry: $${fmt(pos.entryPrice)}\n📈 New Peak: $${fmt(pos.trailPeak)}\n🛡 New SL: $${fmt(pos.trailStop)} | Old: $${fmt(old)}\n🕐 ${now()}`,
+              `🔄 STOP LOSS MOVED UP — ${symbol} | ${interval}\n\n📌 LONG | Entry: $${fmt(pos.entryPrice)}\n📈 New Peak: $${fmt(pos.trailPeak)}\n🛡 New SL: $${fmt(pos.trailStop)} | Old: $${fmt(old)}\n🕐 ${now()}`,
             );
           }
         }
@@ -167,14 +177,14 @@ async function scan(symbol) {
           pos.partialDone = true;
           const pp = ((pos.partialTP - pos.entryPrice) / pos.entryPrice) * 100;
           await sendTelegram(
-            `✂️ PARTIAL TP HIT — ${symbol}\n\n🎯 50% closed at $${fmt(pos.partialTP)}\n📊 ${fmtPct(pp)} (~$${(POSITION_SIZE_USD * 0.5 * (pp / 100)).toFixed(2)})\n🛡 SL still at $${fmt(pos.trailStop)}\n🕐 ${now()}`,
+            `✂️ PARTIAL TP HIT — ${symbol} | ${interval}\n\n🎯 50% closed at $${fmt(pos.partialTP)}\n📊 ${fmtPct(pp)} (~$${(POSITION_SIZE_USD * 0.5 * (pp / 100)).toFixed(2)})\n🛡 SL still at $${fmt(pos.trailStop)}\n🕐 ${now()}`,
           );
         }
 
         if (lows[signalIdx] <= pos.trailStop) {
           const p = ((pos.trailStop - pos.entryPrice) / pos.entryPrice) * 100;
           await sendTelegram(
-            `🛑 CLOSED — TRAILING STOP HIT — ${symbol}\n\n📌 LONG | Entry $${fmt(pos.entryPrice)} → Exit $${fmt(pos.trailStop)}\n📊 ${fmtPct(p)} (~$${(POSITION_SIZE_USD * (p / 100)).toFixed(2)})\n🕐 ${now()}`,
+            `🛑 CLOSED — TRAILING STOP HIT — ${symbol} | ${interval}\n\n📌 LONG | Entry $${fmt(pos.entryPrice)} → Exit $${fmt(pos.trailStop)}\n📊 ${fmtPct(p)} (~$${(POSITION_SIZE_USD * (p / 100)).toFixed(2)})\n🕐 ${now()}`,
           );
           state.position = null;
           return;
@@ -183,7 +193,7 @@ async function scan(symbol) {
         if (deathCross) {
           const p = ((closes[signalIdx] - pos.entryPrice) / pos.entryPrice) * 100;
           await sendTelegram(
-            `🛑 CLOSED — DEATH CROSS — ${symbol}\n\n📌 LONG | Entry $${fmt(pos.entryPrice)} → Exit $${fmt(closes[signalIdx])}\n📊 ${fmtPct(p)} (~$${(POSITION_SIZE_USD * (p / 100)).toFixed(2)})\n🕐 ${now()}`,
+            `🛑 CLOSED — DEATH CROSS — ${symbol} | ${interval}\n\n📌 LONG | Entry $${fmt(pos.entryPrice)} → Exit $${fmt(closes[signalIdx])}\n📊 ${fmtPct(p)} (~$${(POSITION_SIZE_USD * (p / 100)).toFixed(2)})\n🕐 ${now()}`,
           );
           state.position = null;
         }
@@ -196,7 +206,7 @@ async function scan(symbol) {
           pos.trailStop = pos.trailPeak * (1 + TRAILING_STOP_PCT);
           if (pos.trailStop < old - 0.5) {
             await sendTelegram(
-              `🔄 STOP LOSS MOVED DOWN — ${symbol}\n\n📌 SHORT | Entry: $${fmt(pos.entryPrice)}\n📉 New Trough: $${fmt(pos.trailPeak)}\n🛡 New SL: $${fmt(pos.trailStop)} | Old: $${fmt(old)}\n🕐 ${now()}`,
+              `🔄 STOP LOSS MOVED DOWN — ${symbol} | ${interval}\n\n📌 SHORT | Entry: $${fmt(pos.entryPrice)}\n📉 New Trough: $${fmt(pos.trailPeak)}\n🛡 New SL: $${fmt(pos.trailStop)} | Old: $${fmt(old)}\n🕐 ${now()}`,
             );
           }
         }
@@ -205,14 +215,14 @@ async function scan(symbol) {
           pos.partialDone = true;
           const pp = ((pos.entryPrice - pos.partialTP) / pos.entryPrice) * 100;
           await sendTelegram(
-            `✂️ PARTIAL TP HIT — ${symbol}\n\n🎯 50% closed at $${fmt(pos.partialTP)}\n📊 ${fmtPct(pp)} (~$${(POSITION_SIZE_USD * 0.5 * (pp / 100)).toFixed(2)})\n🛡 SL still at $${fmt(pos.trailStop)}\n🕐 ${now()}`,
+            `✂️ PARTIAL TP HIT — ${symbol} | ${interval}\n\n🎯 50% closed at $${fmt(pos.partialTP)}\n📊 ${fmtPct(pp)} (~$${(POSITION_SIZE_USD * 0.5 * (pp / 100)).toFixed(2)})\n🛡 SL still at $${fmt(pos.trailStop)}\n🕐 ${now()}`,
           );
         }
 
         if (highs[signalIdx] >= pos.trailStop) {
           const p = ((pos.entryPrice - pos.trailStop) / pos.entryPrice) * 100;
           await sendTelegram(
-            `🛑 CLOSED — TRAILING STOP HIT — ${symbol}\n\n📌 SHORT | Entry $${fmt(pos.entryPrice)} → Exit $${fmt(pos.trailStop)}\n📊 ${fmtPct(p)} (~$${(POSITION_SIZE_USD * (p / 100)).toFixed(2)})\n🕐 ${now()}`,
+            `🛑 CLOSED — TRAILING STOP HIT — ${symbol} | ${interval}\n\n📌 SHORT | Entry $${fmt(pos.entryPrice)} → Exit $${fmt(pos.trailStop)}\n📊 ${fmtPct(p)} (~$${(POSITION_SIZE_USD * (p / 100)).toFixed(2)})\n🕐 ${now()}`,
           );
           state.position = null;
           return;
@@ -221,7 +231,7 @@ async function scan(symbol) {
         if (goldenCross) {
           const p = ((pos.entryPrice - closes[signalIdx]) / pos.entryPrice) * 100;
           await sendTelegram(
-            `🛑 CLOSED — GOLDEN CROSS — ${symbol}\n\n📌 SHORT | Entry $${fmt(pos.entryPrice)} → Exit $${fmt(closes[signalIdx])}\n📊 ${fmtPct(p)} (~$${(POSITION_SIZE_USD * (p / 100)).toFixed(2)})\n🕐 ${now()}`,
+            `🛑 CLOSED — GOLDEN CROSS — ${symbol} | ${interval}\n\n📌 SHORT | Entry $${fmt(pos.entryPrice)} → Exit $${fmt(closes[signalIdx])}\n📊 ${fmtPct(p)} (~$${(POSITION_SIZE_USD * (p / 100)).toFixed(2)})\n🕐 ${now()}`,
           );
           state.position = null;
         }
@@ -235,9 +245,9 @@ async function scan(symbol) {
       state.lastCrossNotified = "golden";
       state.filtersNotified = false;
       state.lastTouchCandleTime = null;
-      state.lastEntryCheckCandleTime = null;
+      state.lastEntryCheckKey = null;
       await sendTelegram(
-        `☀️ GOLDEN CROSS DETECTED — ${symbol}\n\nEMA20 crossed UP EMA50\nEMA20: $${fmt(e20)} | EMA50: $${fmt(e50)}\nSpread: ${(spread * 100).toFixed(3)}%\n\n⏳ Waiting ${CONFIRM_DELAY} candles, then watching for LIVE EMA20 touch\n🔍 Preparing to enter LONG...\n🕐 ${now()}`,
+        `☀️ GOLDEN CROSS DETECTED — ${symbol} | ${interval}\n\nEMA20 crossed UP EMA50\nEMA20: $${fmt(e20)} | EMA50: $${fmt(e50)}\nSpread: ${(spread * 100).toFixed(3)}%\n\n⏳ Waiting ${CONFIRM_DELAY} candles, then watching for LIVE EMA20 touch\n🔍 Preparing to enter LONG...\n🕐 ${now()}`,
       );
     } else if (deathCross && state.lastCrossNotified !== "death") {
       state.crossState = "death";
@@ -246,9 +256,9 @@ async function scan(symbol) {
       state.lastCrossNotified = "death";
       state.filtersNotified = false;
       state.lastTouchCandleTime = null;
-      state.lastEntryCheckCandleTime = null;
+      state.lastEntryCheckKey = null;
       await sendTelegram(
-        `🌑 DEATH CROSS DETECTED — ${symbol}\n\nEMA20 crossed DOWN EMA50\nEMA20: $${fmt(e20)} | EMA50: $${fmt(e50)}\nSpread: ${(spread * 100).toFixed(3)}%\n\n⏳ Waiting ${CONFIRM_DELAY} candles, then watching for LIVE EMA20 touch\n🔍 Preparing to enter SHORT...\n🕐 ${now()}`,
+        `🌑 DEATH CROSS DETECTED — ${symbol} | ${interval}\n\nEMA20 crossed DOWN EMA50\nEMA20: $${fmt(e20)} | EMA50: $${fmt(e50)}\nSpread: ${(spread * 100).toFixed(3)}%\n\n⏳ Waiting ${CONFIRM_DELAY} candles, then watching for LIVE EMA20 touch\n🔍 Preparing to enter SHORT...\n🕐 ${now()}`,
       );
     }
 
@@ -265,12 +275,13 @@ async function scan(symbol) {
         state.waitingForTouch === "SHORT" && macdHist !== null && macdHist < 0;
       const macdOk = macdLongOk || macdShortOk;
       const allOk = spreadOk && adxOk && macdOk;
+      const entryCheckKey = `${signalTime}_${liveCandleTime}_${state.waitingForTouch}`;
 
-      if (state.lastEntryCheckCandleTime !== liveCandleTime) {
-        state.lastEntryCheckCandleTime = liveCandleTime;
+      if (state.lastEntryCheckKey !== entryCheckKey) {
+        state.lastEntryCheckKey = entryCheckKey;
         console.log(
-          `[ENTRY CHECK] ${symbol} dir=${state.waitingForTouch} ` +
-            `signalTime=${new Date(times[signalIdx]).toISOString()} ` +
+          `[ENTRY CHECK] ${symbol} | ${interval} dir=${state.waitingForTouch} ` +
+            `signalTime=${new Date(signalTime).toISOString()} ` +
             `liveTime=${new Date(liveCandleTime).toISOString()} ` +
             `spread=${(spread * 100).toFixed(3)} ok=${spreadOk} ` +
             `adx=${adxVal?.toFixed(2)} ok=${adxOk} ` +
@@ -283,7 +294,7 @@ async function scan(symbol) {
         state.filtersNotified = true;
         const dir = state.waitingForTouch;
         await sendTelegram(
-          `✅ ALL FILTERS PASSED — READY TO ENTER — ${symbol}\n\n🎯 Direction: ${dir}\n✅ Spread: ${(spread * 100).toFixed(3)}% ≥ ${(MIN_SPREAD_PCT * 100).toFixed(2)}%\n✅ ADX: ${adxVal?.toFixed(1)} ≥ ${ADX_MIN}\n✅ MACD Hist: ${macdHist?.toFixed(3)} (${dir === "LONG" ? "bullish" : "bearish"})\n\n👀 Watching LIVE candle for touch of EMA20 at $${fmt(liveE20)}\n🛡 Initial SL: $${fmt(dir === "LONG" ? liveE20 * (1 - TRAILING_STOP_PCT) : liveE20 * (1 + TRAILING_STOP_PCT))}\n🎯 Partial TP: $${fmt(dir === "LONG" ? liveE20 * (1 + PARTIAL_TP_PCT) : liveE20 * (1 - PARTIAL_TP_PCT))}\n🕐 ${now()}`,
+          `✅ ALL FILTERS PASSED — READY TO ENTER — ${symbol} | ${interval}\n\n🎯 Direction: ${dir}\n✅ Spread: ${(spread * 100).toFixed(3)}% ≥ ${(MIN_SPREAD_PCT * 100).toFixed(2)}%\n✅ ADX: ${adxVal?.toFixed(1)} ≥ ${ADX_MIN}\n✅ MACD Hist: ${macdHist?.toFixed(3)} (${dir === "LONG" ? "bullish" : "bearish"})\n\n👀 Watching LIVE candle for touch of EMA20 at $${fmt(liveE20)}\n🛡 Initial SL: $${fmt(dir === "LONG" ? liveE20 * (1 - TRAILING_STOP_PCT) : liveE20 * (1 + TRAILING_STOP_PCT))}\n🎯 Partial TP: $${fmt(dir === "LONG" ? liveE20 * (1 + PARTIAL_TP_PCT) : liveE20 * (1 - PARTIAL_TP_PCT))}\n🕐 ${now()}`,
         );
       }
 
@@ -307,7 +318,7 @@ async function scan(symbol) {
           state.crossConfirmedAt = null;
           state.filtersNotified = false;
           await sendTelegram(
-            `📈 LONG ENTRY SIGNAL — ${symbol}\n\n💰 Entry: $${fmt(ep)}\n🛡 Stop Loss: $${fmt(sl)} (trailing −${(TRAILING_STOP_PCT * 100).toFixed(1)}%)\n🎯 Partial TP 50%: $${fmt(tp)} (+${(PARTIAL_TP_PCT * 100).toFixed(1)}%)\nEMA20(live): $${fmt(liveE20)} | EMA20(signal): $${fmt(e20)} | EMA50(signal): $${fmt(e50)}\nADX: ${adxVal?.toFixed(1)} | MACD Hist: ${macdHist?.toFixed(3)}\n🕐 ${now()}`,
+            `📈 LONG ENTRY SIGNAL — ${symbol} | ${interval}\n\n💰 Entry: $${fmt(ep)}\n🛡 Stop Loss: $${fmt(sl)} (trailing −${(TRAILING_STOP_PCT * 100).toFixed(1)}%)\n🎯 Partial TP 50%: $${fmt(tp)} (+${(PARTIAL_TP_PCT * 100).toFixed(1)}%)\nEMA20(live): $${fmt(liveE20)} | EMA20(signal): $${fmt(e20)} | EMA50(signal): $${fmt(e50)}\nADX: ${adxVal?.toFixed(1)} | MACD Hist: ${macdHist?.toFixed(3)}\n🕐 ${now()}`,
           );
         } else {
           const sl = ep * (1 + TRAILING_STOP_PCT);
@@ -325,62 +336,70 @@ async function scan(symbol) {
           state.crossConfirmedAt = null;
           state.filtersNotified = false;
           await sendTelegram(
-            `📉 SHORT ENTRY SIGNAL — ${symbol}\n\n💰 Entry: $${fmt(ep)}\n🛡 Stop Loss: $${fmt(sl)} (trailing +${(TRAILING_STOP_PCT * 100).toFixed(1)}%)\n🎯 Partial TP 50%: $${fmt(tp)} (−${(PARTIAL_TP_PCT * 100).toFixed(1)}%)\nEMA20(live): $${fmt(liveE20)} | EMA20(signal): $${fmt(e20)} | EMA50(signal): $${fmt(e50)}\nADX: ${adxVal?.toFixed(1)} | MACD Hist: ${macdHist?.toFixed(3)}\n🕐 ${now()}`,
+            `📉 SHORT ENTRY SIGNAL — ${symbol} | ${interval}\n\n💰 Entry: $${fmt(ep)}\n🛡 Stop Loss: $${fmt(sl)} (trailing +${(TRAILING_STOP_PCT * 100).toFixed(1)}%)\n🎯 Partial TP 50%: $${fmt(tp)} (−${(PARTIAL_TP_PCT * 100).toFixed(1)}%)\nEMA20(live): $${fmt(liveE20)} | EMA20(signal): $${fmt(e20)} | EMA50(signal): $${fmt(e50)}\nADX: ${adxVal?.toFixed(1)} | MACD Hist: ${macdHist?.toFixed(3)}\n🕐 ${now()}`,
           );
         }
       }
     }
 
     console.log(
-      `[${new Date().toISOString()}] ${symbol} | ${INTERVAL} $${fmt(currentPrice)} EMA20:${e20?.toFixed(1)} EMA50:${e50?.toFixed(1)} ADX:${adxVal?.toFixed(1)} Pos:${state.position?.type || "none"}`,
+      `[${new Date().toISOString()}] ${symbol} | ${interval} $${fmt(currentPrice)} EMA20:${e20?.toFixed(1)} EMA50:${e50?.toFixed(1)} ADX:${adxVal?.toFixed(1)} Pos:${state.position?.type || "none"}`,
     );
   } catch (err) {
-    console.error(`[${symbol}] Scan error:`, err.message);
+    console.error(`[${symbol} | ${interval}] Scan error:`, err.message);
   }
 }
 
 async function sendPnlUpdate() {
   for (const symbol of SYMBOLS) {
-    const state = states[symbol];
-    if (!state.position) continue;
+    for (const interval of INTERVALS) {
+      const state = states[stateKey(symbol, interval)];
+      if (!state.position) continue;
 
-    try {
-      const klines = await fetchKlines(symbol, 5);
-      const cp = parseFloat(klines[klines.length - 1][4]);
-      const pos = state.position;
-      const pnlPct =
-        pos.type === "LONG"
-          ? ((cp - pos.entryPrice) / pos.entryPrice) * 100
-          : ((pos.entryPrice - cp) / pos.entryPrice) * 100;
-      const pnlUsd = POSITION_SIZE_USD * (pnlPct / 100);
-      const diff = cp - pos.entryPrice;
-      const toStop =
-        pos.type === "LONG"
-          ? ((cp - pos.trailStop) / cp) * 100
-          : ((pos.trailStop - cp) / cp) * 100;
+      try {
+        const klines = await fetchKlines(symbol, interval, 5);
+        const cp = parseFloat(klines[klines.length - 1][4]);
+        const pos = state.position;
+        const pnlPct =
+          pos.type === "LONG"
+            ? ((cp - pos.entryPrice) / pos.entryPrice) * 100
+            : ((pos.entryPrice - cp) / pos.entryPrice) * 100;
+        const pnlUsd = POSITION_SIZE_USD * (pnlPct / 100);
+        const diff = cp - pos.entryPrice;
+        const toStop =
+          pos.type === "LONG"
+            ? ((cp - pos.trailStop) / cp) * 100
+            : ((pos.trailStop - cp) / cp) * 100;
 
-      await sendTelegram(
-        `${pnlEmoji(pnlPct)} POSITION UPDATE — ${symbol}\n\n📌 ${pos.type} | Entry: $${fmt(pos.entryPrice)}\n📊 Current: $${fmt(cp)} (${diff >= 0 ? "+" : ""}${fmt(diff)})\n💵 PnL: ${fmtPct(pnlPct)} (~$${pnlUsd.toFixed(2)})\n🛡 SL: $${fmt(pos.trailStop)} (${toStop.toFixed(2)}% away)\n${pos.partialDone ? "✂️ Partial TP already taken" : `🎯 Partial TP target: $${fmt(pos.partialTP)}`}\n🕐 ${now()}`,
-      );
-    } catch (err) {
-      console.error(`[${symbol}] PnL update error:`, err.message);
+        await sendTelegram(
+          `${pnlEmoji(pnlPct)} POSITION UPDATE — ${symbol} | ${interval}\n\n📌 ${pos.type} | Entry: $${fmt(pos.entryPrice)}\n📊 Current: $${fmt(cp)} (${diff >= 0 ? "+" : ""}${fmt(diff)})\n💵 PnL: ${fmtPct(pnlPct)} (~$${pnlUsd.toFixed(2)})\n🛡 SL: $${fmt(pos.trailStop)} (${toStop.toFixed(2)}% away)\n${pos.partialDone ? "✂️ Partial TP already taken" : `🎯 Partial TP target: $${fmt(pos.partialTP)}`}\n🕐 ${now()}`,
+        );
+      } catch (err) {
+        console.error(`[${symbol} | ${interval}] PnL update error:`, err.message);
+      }
     }
   }
 }
 
 async function scanAll() {
-  await Promise.all(SYMBOLS.map((sym) => scan(sym)));
+  const tasks = [];
+  for (const symbol of SYMBOLS) {
+    for (const interval of INTERVALS) {
+      tasks.push(scan(symbol, interval));
+    }
+  }
+  await Promise.all(tasks);
 }
 
 async function main() {
-  console.log(`🚀 EMA Multi-Coin Scanner | ${SYMBOLS.join(", ")} | ${INTERVAL}`);
+  console.log(`🚀 EMA Multi-Coin Scanner | ${SYMBOLS.join(", ")} | ${INTERVALS.join(", ")}`);
   console.log(
     `📡 Telegram: ${TELEGRAM_TOKEN ? "configured" : "DISABLED — set TELEGRAM_BOT_TOKEN in .env"}`,
   );
 
   if (TELEGRAM_TOKEN && TELEGRAM_CHAT_ID) {
     await sendTelegram(
-      `🚀 EMA Multi-Coin Scanner Started\n\n📊 ${SYMBOLS.join(" | ")} | ⏱ ${INTERVAL}\nSpread ≥${(MIN_SPREAD_PCT * 100).toFixed(1)}% | ADX ≥${ADX_MIN} | MACD | ${CONFIRM_DELAY}-candle delay\nTrailing SL: ${(TRAILING_STOP_PCT * 100).toFixed(1)}% | Partial TP: ${(PARTIAL_TP_PCT * 100).toFixed(1)}%\nMode: closed-candle cross/filter + LIVE candle EMA touch\n🕐 ${now()}`,
+      `🚀 EMA Multi-Coin Scanner Started\n\n📊 Symbols: ${SYMBOLS.join(" | ")}\n⏱ Intervals: ${INTERVALS.join(" | ")}\nSpread ≥${(MIN_SPREAD_PCT * 100).toFixed(1)}% | ADX ≥${ADX_MIN} | MACD | ${CONFIRM_DELAY}-candle delay\nTrailing SL: ${(TRAILING_STOP_PCT * 100).toFixed(1)}% | Partial TP: ${(PARTIAL_TP_PCT * 100).toFixed(1)}%\nMode: closed-candle cross/filter + LIVE candle EMA touch\n🕐 ${now()}`,
     );
   }
 
